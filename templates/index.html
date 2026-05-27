@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title> Smart Drive AI </title>
+    <style>
+        /* ----- Global Styles ----- */
+        body {
+            font-family: "Poppins", sans-serif;
+            background: linear-gradient(27deg, rgba(9, 173, 237, 1) 0%, rgba(0, 0, 0, 1) 55%, rgba(0, 255, 144, 1) 100%);
+            color: #333;
+            margin: 0;
+            padding: 0;
+            background-attachment: fixed;
+        }
+
+        .container {
+            background: white;
+            max-width: 800px;
+            margin: 60px auto;
+            padding: 40px;
+            border-radius: 16px;
+            box-shadow: 0 6px 20px rgba(0,0,0,0.15);
+        }
+
+        h1 {
+            text-align: center;
+            color: #0078d7;
+            margin-top: -5px;
+        }
+
+        label {
+            display: block;
+            margin-top: 15px;
+            font-weight: bold;
+            color: #444;
+        }
+
+        input, select {
+            width: 100%;
+            padding: 10px;
+            margin-top: 8px;
+            border: 2px solid #0078d7;
+            border-radius: 6px;
+            font-size: 1em;
+        }
+
+        button {
+            margin-top: 25px;
+            width: 100%;
+            padding: 12px;
+            background-color: #0078d7;
+            border: none;
+            color: white;
+            font-size: 1.1em;
+            font-weight: bold;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: 0.3s;
+        }
+
+        button:hover {
+            background-color: #005fa3;
+        }
+
+        #results {
+            margin-top: 30px;
+            padding: 15px;
+            background: #f8f9fb;
+            border-radius: 8px;
+        }
+
+        .car-card {
+            background: #e8f3ff;
+            border-left: 5px solid #0078d7;
+            padding: 15px;
+            margin-bottom: 15px;
+            border-radius: 8px;
+            animation: fadeIn 0.4s ease-in-out;
+        }
+
+        @keyframes fadeIn {
+            from {opacity: 0; transform: translateY(10px);}
+            to {opacity: 1; transform: translateY(0);}
+        }
+
+        footer {
+            text-align: center;
+            color: white;
+            margin-top: 40px;
+            font-size: 0.9em;
+        }
+
+        /* inline error style */
+        .inline-error {
+            color: #b00020;
+            margin-top: 6px;
+            font-size: 0.95rem;
+            display: none;
+        }
+
+        /* show-more button area */
+        #showMoreContainer {
+            margin-top: 10px;
+            text-align: center;
+        }
+
+        #showMoreBtn {
+            display: inline-block;
+            padding: 8px 12px;
+            border-radius: 8px;
+            border: 1px solid #0078d7;
+            background: white;
+            color: #0078d7;
+            cursor: pointer;
+            font-weight: 600;
+        }
+        #showMoreBtn:hover { background: #f1f9ff; }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <p style="text-align:center; color:#666;">Confused to choose your car? Let us help you with our</p>
+        <h1>SMART DRIVE AI 🚘 </h1>
+        <p style="text-align:center; color:#666;">Find the perfect car that matches your lifestyle and budget ✌🏻</p>
+
+        <label for="budget">💰 Budget (₹)</label>
+        <input id="budget" placeholder="e.g. 1000000" type="number" min="500000" />
+        <!-- inline red error for budget (used for empty & server errors) -->
+        <div id="budgetError" class="inline-error" role="alert" aria-live="polite"></div>
+
+        <label for="brand">🏷️ Preferred Brand</label>
+        <select id="brand">
+            <option value="">Any</option>
+            <option value="Toyota">Toyota</option>
+            <option value="Honda">Honda</option>
+            <option value="Tesla">Tesla</option>
+            <option value="BMW">BMW</option>
+            <option value="Audi">Audi</option>
+            <option value="Mercedes">Mercedes</option>
+            <option value="Kia">Kia</option>
+            <option value="Hyundai">Hyundai</option>
+            <option value="Nissan">Nissan</option>
+            <option value="Volkswagen">Volkswagen</option>
+            <option value="Chevrolet">Chevrolet</option>
+            <option value="Suzuki">Suzuki</option>
+            <option value="Skoda">Skoda</option>
+            <option value="Mahindra">Mahindra</option>
+        </select>
+
+        <label for="fuel">⚡ Fuel Type</label>
+        <select id="fuel">
+            <option value="">Any</option>
+            <option value="Petrol">Petrol</option>
+            <option value="Diesel">Diesel</option>
+            <option value="Electric">Electric</option>
+            <option value="Hybrid">Hybrid</option>
+        </select>
+
+        <!-- button is type="button" so page won't auto-submit -->
+        <button id="recommendBtn" type="button">Get Recommendations</button>
+
+        <div id="results"></div>
+        <div id="showMoreContainer" aria-live="polite"></div>
+    </div>
+    <br>
+    <br>
+    <br>
+    <footer>© 2025 Car Recommendation AI | Built with Python & Our BHAICHARA 😎</footer>
+
+    <script>
+        // Configuration
+        const PAGE_SIZE = 3;
+
+        // State
+        let currentOffset = 0;
+        let totalMatches = 0;
+        let allLoadedResults = []; // store all appended results for easy collapse
+        let lastFilters = null;
+        let showCollapsed = true; // when collapsed, show only first PAGE_SIZE
+
+        // Utility: escape HTML to avoid injection
+        function escapeHtml(unsafe) {
+            if (unsafe === null || unsafe === undefined) return '';
+            return String(unsafe)
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }
+
+        // Utility: show budget error text in red under the input
+        function showBudgetError(msg) {
+            const budgetError = document.getElementById('budgetError');
+            const budgetInput = document.getElementById('budget');
+            if (budgetError) {
+                budgetError.textContent = msg;
+                budgetError.style.display = 'block';
+            }
+            if (budgetInput) {
+                budgetInput.style.border = '2px solid #b00020';
+            }
+        }
+
+        function clearBudgetError() {
+            const budgetError = document.getElementById('budgetError');
+            const budgetInput = document.getElementById('budget');
+            if (budgetError) {
+                budgetError.textContent = '';
+                budgetError.style.display = 'none';
+            }
+            if (budgetInput) {
+                budgetInput.style.border = '';
+            }
+        }
+
+        // Render helpers
+        function renderResultsList(resultsToRender) {
+            const resultsDiv = document.getElementById('results');
+            if (!resultsDiv) return;
+            if (!resultsToRender || resultsToRender.length === 0) {
+                resultsDiv.innerHTML = '<p>No cars match your criteria.</p>';
+                return;
+            }
+
+            let html = '';
+            resultsToRender.forEach(car => {
+                const priceNum = Number(car.price_in_inr || car.price || 0);
+                const price = isNaN(priceNum) ? '-' : priceNum.toLocaleString();
+                html += `
+                    <div class="car-card">
+                        <h3>${escapeHtml(car.name || 'Unknown')}</h3>
+                        <p><strong>Brand:</strong> ${escapeHtml(car.brand || 'N/A')}</p>
+                        <p><strong>Fuel:</strong> ${escapeHtml(car.fuel || 'N/A')}</p>
+                        <p><strong>Price (INR):</strong> ₹${price} /-</p>
+                    </div>
+                `;
+            });
+            resultsDiv.innerHTML = html;
+        }
+
+        function renderShowMoreButton() {
+            const container = document.getElementById('showMoreContainer');
+            container.innerHTML = '';
+
+            const remaining = Math.max(0, totalMatches - allLoadedResults.length);
+            if (remaining === 0 && allLoadedResults.length <= PAGE_SIZE) {
+                // nothing to show or no pagination needed
+                return;
+            }
+
+            // create button
+            const btn = document.createElement('button');
+            btn.id = 'showMoreBtn';
+            btn.type = 'button';
+            if (showCollapsed) {
+                // show a simple "Show more" label (no count)
+                btn.textContent = 'Show more';
+                btn.onclick = async () => {
+                    // If there are more already loaded (appended), just expand; otherwise fetch next page
+                    if (allLoadedResults.length > PAGE_SIZE) {
+                        // we have appended pages already — expand to show all loaded
+                        showCollapsed = false;
+                        renderResultsList(allLoadedResults);
+                        renderShowMoreButton();
+                    } else {
+                        // fetch next page from server
+                        await loadMoreRecommendations();
+                    }
+                };
+            } else {
+                btn.textContent = 'Show less';
+                btn.onclick = () => {
+                    // collapse back to first page
+                    showCollapsed = true;
+                    // render only first PAGE_SIZE results (if we have them), else slice available
+                    renderResultsList(allLoadedResults.slice(0, PAGE_SIZE));
+                    renderShowMoreButton();
+                    // scroll into view top of results for better UX
+                    document.getElementById('results').scrollIntoView({behavior: 'smooth', block: 'start'});
+                };
+            }
+
+            container.appendChild(btn);
+        }
+
+        // Fetch page from server. Uses lastFilters and currentOffset.
+        async function fetchPageFromServer(limit = PAGE_SIZE, offset = 0) {
+            const body = {
+                brand: lastFilters.brand || '',
+                fuel: lastFilters.fuel || '',
+                budget: lastFilters.budget || null,
+                limit: limit,
+                offset: offset
+            };
+
+            const res = await fetch('/recommend', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(body)
+            });
+
+            const data = await res.json().catch(()=>({ message: 'Server returned invalid JSON' }));
+            if (!res.ok) {
+                // throw server message for caller to handle
+                const msg = data.message || data.error || 'Server error';
+                throw new Error(msg);
+            }
+
+            return data;
+        }
+
+        // initial load (first page)
+        async function loadInitialRecommendations(filters) {
+            currentOffset = 0;
+            totalMatches = 0;
+            allLoadedResults = [];
+            showCollapsed = true;
+            lastFilters = filters;
+
+            const resultsDiv = document.getElementById('results');
+            if (resultsDiv) resultsDiv.innerHTML = '<p>⏳ Fetching best matches...</p>';
+            document.getElementById('showMoreContainer').innerHTML = '';
+
+            try {
+                const data = await fetchPageFromServer(PAGE_SIZE, currentOffset);
+                const recs = data.recommendations || [];
+                totalMatches = Number(data.total || recs.length || 0);
+                const limitUsed = Number(data.limit || PAGE_SIZE);
+                const offsetUsed = Number(data.offset || currentOffset);
+
+                // save loaded results
+                allLoadedResults = allLoadedResults.concat(recs);
+
+                // render first page
+                renderResultsList(allLoadedResults.slice(0, PAGE_SIZE));
+                // update offset for next fetch
+                currentOffset = offsetUsed + limitUsed;
+
+                // show button if more exists
+                renderShowMoreButton();
+            } catch (err) {
+                // show error
+                if (resultsDiv) resultsDiv.innerHTML = `<p style="color:#b00020">${escapeHtml(err.message)}</p>`;
+                document.getElementById('showMoreContainer').innerHTML = '';
+            }
+        }
+
+        // load more (next page)
+        async function loadMoreRecommendations() {
+            // disable button while loading
+            const btn = document.getElementById('showMoreBtn');
+            if (btn) {
+                btn.disabled = true;
+                btn.textContent = 'Loading...';
+            }
+
+            try {
+                const data = await fetchPageFromServer(PAGE_SIZE, currentOffset);
+                const recs = data.recommendations || [];
+                const limitUsed = Number(data.limit || PAGE_SIZE);
+                const offsetUsed = Number(data.offset || currentOffset);
+
+                // append newly loaded results
+                allLoadedResults = allLoadedResults.concat(recs);
+
+                // render all loaded results (expanded view)
+                showCollapsed = false;
+                renderResultsList(allLoadedResults);
+
+                // update offset
+                currentOffset = offsetUsed + limitUsed;
+
+                // update total if available
+                totalMatches = Number(data.total || totalMatches || allLoadedResults.length);
+
+                // re-render button
+                renderShowMoreButton();
+            } catch (err) {
+                const resultsDiv = document.getElementById('results');
+                if (resultsDiv) resultsDiv.innerHTML = `<p style="color:#b00020">${escapeHtml(err.message)}</p>`;
+                document.getElementById('showMoreContainer').innerHTML = '';
+            } finally {
+                if (btn) {
+                    btn.disabled = false;
+                }
+            }
+        }
+
+        // Clear results on load so dataset doesn't show automatically
+        document.addEventListener('DOMContentLoaded', () => {
+            const resultsDiv = document.getElementById('results');
+            if (resultsDiv) resultsDiv.innerHTML = '';
+            clearBudgetError();
+        });
+
+        // Main handler: validate inputs, then call loadInitialRecommendations
+        document.getElementById('recommendBtn').addEventListener('click', async (e) => {
+            e.preventDefault();
+
+            clearBudgetError();
+            const budgetRaw = (document.getElementById('budget').value || '').trim();
+            const brand = (document.getElementById('brand').value || '').trim();
+            const fuel = (document.getElementById('fuel').value || '').trim();
+
+            const resultsDiv = document.getElementById('results');
+
+            // If ALL fields empty -> ask user to enter budget (as requested)
+            if (budgetRaw === '') {
+                showBudgetError(' અહિયા બાકી છે.');
+                if (resultsDiv) resultsDiv.innerHTML = '';
+                return;
+            }
+
+            // Validate numeric
+            const budgetNum = Number(budgetRaw);
+            if (isNaN(budgetNum)) {
+                showBudgetError('Please enter a valid numeric budget.');
+                if (resultsDiv) resultsDiv.innerHTML = '';
+                return;
+            }
+
+            // min check (client-side)
+            if (budgetNum < 500000) {
+                showBudgetError('ભલા માણસ આટલુ ઓછુ થોડી હોય?');
+                if (resultsDiv) resultsDiv.innerHTML = '';
+                return;
+            }
+
+            // passed validation; start first page load
+            const filters = { budget: budgetNum, brand, fuel };
+            lastFilters = filters;
+            await loadInitialRecommendations(filters);
+        });
+    </script>
+
+</body>
+</html>
