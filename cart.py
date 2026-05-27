@@ -1,265 +1,572 @@
-# app.py (updated)
 from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
 import csv
+import os
 import re
 from math import fabs
+
+# =========================================================
+# SMART DRIVE AI - PROFESSIONAL VERSION
+# =========================================================
 
 app = Flask(__name__)
 CORS(app)
 
+# =========================================================
+# GLOBAL SETTINGS
+# =========================================================
 
-def _parse_float_safe(val):
+DEFAULT_LIMIT = 6
+MAX_LIMIT = 20
+
+# =========================================================
+# HELPER FUNCTIONS
+# =========================================================
+
+def parse_float_safe(value):
     """
-    Try to parse numeric value from strings like "1,234,567" or "1234567.00".
-    Returns float or None.
+    Convert strings like:
+    '12,00,000'
+    '$12000'
+    '12000.50'
+
+    into float safely.
     """
-    if val is None:
+
+    if value is None:
         return None
-    s = str(val).strip()
-    if s == "":
+
+    value = str(value).strip()
+
+    if value == "":
         return None
-    # Remove any non-digit/non-dot characters (commas, currency symbols, spaces)
-    cleaned = re.sub(r"[^\d.]", "", s)
+
+    cleaned = re.sub(r"[^\d.]", "", value)
+
     try:
         return float(cleaned)
-    except ValueError:
+    except:
         return None
 
 
-# --- Load Car Data from CSV File ---
+def normalize_text(value):
+    """
+    Normalize text for matching.
+    """
+
+    if value is None:
+        return ""
+
+    return str(value).strip().lower()
+
+
+# =========================================================
+# LOAD CSV DATA
+# =========================================================
+
 def load_cars_from_csv(filename="cars.csv"):
-    """
-    Loads CSV into a list of dicts.
-    Normalizes name/brand/fuel (strip + lower).
-    Converts price fields to numeric and stores as 'price_in_inr' (float or None).
-    """
+
     cars = []
+
     try:
+
         with open(filename, newline="", encoding="utf-8") as csvfile:
+
             reader = csv.DictReader(csvfile)
+
             for row in reader:
-                # Normalize text fields (so filters match reliably)
-                for text_col in ("name", "brand", "fuel"):
-                    if text_col in row:
-                        row[text_col] = (row[text_col] or "").strip().lower()
-                    else:
-                        row[text_col] = ""
 
-                # Normalize price: prefer 'price_in_inr', fall back to 'price'
-                price_in_inr = None
-                if "price_in_inr" in row and (row["price_in_inr"] or "").strip() != "":
-                    price_in_inr = _parse_float_safe(row["price_in_inr"])
-                elif "price" in row and (row["price"] or "").strip() != "":
-                    price_in_inr = _parse_float_safe(row["price"])
+                # ---------------------------
+                # Normalize text fields
+                # ---------------------------
 
-                # store numeric price
-                row["price_in_inr"] = price_in_inr
+                row["name"] = normalize_text(row.get("name"))
+                row["brand"] = normalize_text(row.get("brand"))
+                row["fuel"] = normalize_text(row.get("fuel"))
 
-                # Optionally remove original 'price' if present
-                if "price" in row:
-                    row.pop("price", None)
+                # ---------------------------
+                # Normalize price
+                # ---------------------------
+
+                price = None
+
+                if "price_in_inr" in row:
+                    price = parse_float_safe(row["price_in_inr"])
+
+                elif "price" in row:
+                    price = parse_float_safe(row["price"])
+
+                row["price_in_inr"] = price
+
+                # ---------------------------
+                # Add default image
+                # ---------------------------
+
+                row["image"] = row.get(
+                    "image",
+                    "https://images.unsplash.com/photo-1503376780353-7e6692767b70"
+                )
 
                 cars.append(row)
+
     except FileNotFoundError:
-        print(f"Error: {filename} not found. Make sure it exists!")
+        print("cars.csv file not found!")
+
     return cars
 
 
-# Load data from CSV at start (cache in memory)
+# =========================================================
+# LOAD ALL CARS
+# =========================================================
+
 cars = load_cars_from_csv()
 
+print(f"Loaded {len(cars)} cars successfully.")
 
-# --- Scoring and sorting utility ---
-def score_and_sort_results(results, budget=None, brand_pref=None, fuel_pref=None):
-    """
-    Score each car in results and return a sorted list.
-    If budget is provided, we prefer cars that are closer to budget (higher price <= budget).
-    We compute a simple score:
-      base_score = -abs(price - budget)  (smaller distance -> higher score)
-    and small boosts for brand/fuel matches.
-    If no budget is provided, we sort by price ascending.
-    """
-    scored = []
-    for car in results:
-        price = car.get("price_in_inr")
-        # default score
-        score = 0.0
-        if budget is not None and price is not None:
-            # smaller absolute difference -> higher score
-            # use negative abs to allow descending sort later
-            score = -fabs(price - budget)
-            # prefer cars that are <= budget (slight bonus)
-            if price <= budget:
-                score += 1.0
-        else:
-            # fallback: prefer lower prices (simple)
-            score = -price if price is not None else float("-inf")
+# =========================================================
+# ADVANCED FILTER SYSTEM
+# =========================================================
 
-        # brand boost (optional)
-        if brand_pref and (car.get("brand") or "") == brand_pref.lower():
-            score += 2.0
-        # fuel boost (optional)
-        if fuel_pref and (car.get("fuel") or "") == fuel_pref.lower():
-            score += 1.0
+def filter_cars(
+    budget=None,
+    brand=None,
+    fuel=None,
+    search=None
+):
 
-        # attach numeric score for debugging/inspection
-        car["_score"] = score
-        scored.append(car)
-
-    # sort by score descending so highest score comes first
-    scored.sort(key=lambda r: r.get("_score", float("-inf")), reverse=True)
-    return scored
-
-
-# --- Filter cars based on user input ---
-def filter_cars(budget, brand, fuel):
-    """
-    Return cars that satisfy the given filters.
-    - budget: numeric or None (we interpret as max price)
-    - brand: substring match (case-insensitive)
-    - fuel: exact match (normalized)
-    """
     results = []
+
     for car in cars:
+
+        # -------------------------------------
+        # Skip cars without price
+        # -------------------------------------
+
         price = car.get("price_in_inr")
-        # If price is missing or not numeric, skip that row (you can change policy)
+
         if price is None:
             continue
 
+        # -------------------------------------
+        # Budget Filter
+        # -------------------------------------
+
         if budget is not None:
-            # price must be <= budget
-            try:
-                if float(price) > float(budget):
-                    continue
-            except (ValueError, TypeError):
+
+            if price > budget:
                 continue
 
-        # brand filter: allow substring matching (so "tata" matches "tata motors")
+        # -------------------------------------
+        # Brand Filter
+        # -------------------------------------
+
         if brand:
-            if brand.lower() not in (car.get("brand") or "").lower():
+
+            if brand.lower() not in car["brand"]:
                 continue
 
-        # fuel filter: exact normalized match
+        # -------------------------------------
+        # Fuel Filter
+        # -------------------------------------
+
         if fuel:
-            if fuel.lower() != (car.get("fuel") or "").lower():
+
+            if fuel.lower() != car["fuel"]:
                 continue
 
-        # Row passes all filters
-        results.append(car.copy())  # copy to avoid side-effects when scoring
+        # -------------------------------------
+        # Search Filter
+        # -------------------------------------
+
+        if search:
+
+            combined = (
+                car["name"] +
+                " " +
+                car["brand"] +
+                " " +
+                car["fuel"]
+            )
+
+            if search.lower() not in combined:
+                continue
+
+        results.append(car.copy())
+
     return results
 
+# =========================================================
+# AI-LIKE RANKING SYSTEM
+# =========================================================
 
-def paginate_list(items, limit=3, offset=0):
-    """
-    Return a slice and metadata: items_slice, total_count, has_more
-    limit/offset are sanitized and converted to ints.
-    """
+def calculate_score(
+    car,
+    budget=None,
+    preferred_brand=None,
+    preferred_fuel=None
+):
+
+    score = 0
+
+    price = car.get("price_in_inr")
+
+    # -------------------------------------
+    # Budget proximity score
+    # -------------------------------------
+
+    if budget is not None and price is not None:
+
+        difference = fabs(price - budget)
+
+        score += max(0, 1000000 - difference)
+
+        if price <= budget:
+            score += 50000
+
+    # -------------------------------------
+    # Brand preference bonus
+    # -------------------------------------
+
+    if preferred_brand:
+
+        if preferred_brand.lower() in car["brand"]:
+            score += 30000
+
+    # -------------------------------------
+    # Fuel preference bonus
+    # -------------------------------------
+
+    if preferred_fuel:
+
+        if preferred_fuel.lower() == car["fuel"]:
+            score += 20000
+
+    return score
+
+
+def rank_cars(
+    car_list,
+    budget=None,
+    brand=None,
+    fuel=None
+):
+
+    ranked = []
+
+    for car in car_list:
+
+        score = calculate_score(
+            car,
+            budget,
+            brand,
+            fuel
+        )
+
+        car["_score"] = score
+
+        ranked.append(car)
+
+    ranked.sort(
+        key=lambda x: x["_score"],
+        reverse=True
+    )
+
+    return ranked
+
+# =========================================================
+# PAGINATION SYSTEM
+# =========================================================
+
+def paginate_results(items, limit, offset):
+
     total = len(items)
-    # sanitize offset/limit
-    try:
-        offset = int(offset)
-        if offset < 0:
-            offset = 0
-    except (ValueError, TypeError):
-        offset = 0
-    try:
-        # If limit is None or empty, default to total (return all)
-        if limit in (None, "", []):
-            limit = total if total > 0 else 3
-        limit = int(limit)
-        if limit <= 0:
-            limit = 3
-    except (ValueError, TypeError):
-        limit = 3
 
-    slice_items = items[offset: offset + limit]
+    sliced = items[offset:offset + limit]
+
     has_more = (offset + limit) < total
-    return slice_items, total, has_more
 
+    return {
+        "items": sliced,
+        "total": total,
+        "has_more": has_more
+    }
 
-# Home Route (serves your HTML page)
-@app.route('/')
+# =========================================================
+# HOME PAGE
+# =========================================================
+
+@app.route("/")
 def home():
-    return render_template('index.html')
+    return render_template("index.html")
 
+# =========================================================
+# HEALTH CHECK
+# =========================================================
 
-# Recommendation API with pagination support
-@app.route('/recommend', methods=['POST', 'GET'])
-def recommend():
-    # Accept JSON body (POST) or query params (GET)
-    if request.method == 'POST':
-        data = request.get_json() or {}
-        budget_raw = data.get('budget', None)
-        brand = (data.get('brand') or '').strip()
-        fuel = (data.get('fuel') or '').strip()
-        # optional pagination params
-        limit = data.get('limit', None)
-        offset = data.get('offset', 0)
-    else:
-        # GET (fallback) - read from query string
-        budget_raw = request.args.get('budget', None)
-        brand = (request.args.get('brand') or '').strip()
-        fuel = (request.args.get('fuel') or '').strip()
-        limit = request.args.get('limit', None)
-        offset = request.args.get('offset', 0)
-
-    # parse budget safely (allow strings like "1,500,000")
-    try:
-        budget = _parse_float_safe(budget_raw) if budget_raw not in (None, "", []) else None
-    except Exception:
-        return jsonify({"message": "Invalid budget format."}), 400
-
-    # Reject negative budgets
-    if budget is not None and budget < 0:
-        return jsonify({"message": "Budget must be a positive number."}), 400
-
-    # Prevent returning entire dataset when no filters provided
-    if budget is None and not brand and not fuel:
-        return jsonify(
-            {
-                "recommendations": [],
-                "total": 0,
-                "has_more": False,
-                "message": "Please provide a budget or at least one filter (brand or fuel) before requesting recommendations."
-            }
-        ), 400
-
-    # Filter candidates first
-    all_matches = filter_cars(budget, brand, fuel)
-
-    if not all_matches:
-        return jsonify({"recommendations": [], "total": 0, "has_more": False, "message": "No cars found matching your preferences."})
-
-    # Score and sort matches (prefer cars closer to budget)
-    ranked = score_and_sort_results(all_matches, budget, brand_pref=brand, fuel_pref=fuel)
-
-    # apply pagination
-    slice_items, total, has_more = paginate_list(ranked, limit=limit, offset=offset)
-
-    # Remove internal _score before returning (but keep if you want to debug)
-    for c in slice_items:
-        if "_score" in c:
-            c.pop("_score", None)
-
-    # Normalize numeric metadata
-    try:
-        offset_int = int(offset)
-    except (ValueError, TypeError):
-        offset_int = 0
-    try:
-        limit_int = int(limit) if limit not in (None, "", []) else len(slice_items)
-    except (ValueError, TypeError):
-        limit_int = len(slice_items)
+@app.route("/health")
+def health():
 
     return jsonify({
-        "recommendations": slice_items,
-        "total": total,
-        "has_more": has_more,
-        "offset": offset_int,
-        "limit": limit_int
+        "status": "healthy",
+        "cars_loaded": len(cars)
     })
 
+# =========================================================
+# MAIN RECOMMENDATION API
+# =========================================================
 
-if __name__ == '__main__':
-    app.run(host="0.0.0.0", port=10000)
+@app.route("/recommend", methods=["POST"])
+def recommend():
+
+    try:
+
+        data = request.get_json()
+
+        # -------------------------------------
+        # Get Input Data
+        # -------------------------------------
+
+        budget = parse_float_safe(data.get("budget"))
+
+        brand = normalize_text(data.get("brand"))
+
+        fuel = normalize_text(data.get("fuel"))
+
+        search = normalize_text(data.get("search"))
+
+        limit = data.get("limit", DEFAULT_LIMIT)
+
+        offset = data.get("offset", 0)
+
+        # -------------------------------------
+        # Validate Limit
+        # -------------------------------------
+
+        try:
+            limit = int(limit)
+        except:
+            limit = DEFAULT_LIMIT
+
+        if limit <= 0:
+            limit = DEFAULT_LIMIT
+
+        if limit > MAX_LIMIT:
+            limit = MAX_LIMIT
+
+        # -------------------------------------
+        # Validate Offset
+        # -------------------------------------
+
+        try:
+            offset = int(offset)
+        except:
+            offset = 0
+
+        if offset < 0:
+            offset = 0
+
+        # -------------------------------------
+        # Prevent empty queries
+        # -------------------------------------
+
+        if (
+            budget is None and
+            brand == "" and
+            fuel == "" and
+            search == ""
+        ):
+
+            return jsonify({
+                "success": False,
+                "message": "Please enter at least one filter.",
+                "recommendations": []
+            }), 400
+
+        # -------------------------------------
+        # Filter Cars
+        # -------------------------------------
+
+        filtered = filter_cars(
+            budget,
+            brand,
+            fuel,
+            search
+        )
+
+        # -------------------------------------
+        # No Results
+        # -------------------------------------
+
+        if len(filtered) == 0:
+
+            return jsonify({
+                "success": True,
+                "message": "No cars found matching your preferences.",
+                "recommendations": [],
+                "total": 0,
+                "has_more": False
+            })
+
+        # -------------------------------------
+        # Rank Results
+        # -------------------------------------
+
+        ranked = rank_cars(
+            filtered,
+            budget,
+            brand,
+            fuel
+        )
+
+        # -------------------------------------
+        # Pagination
+        # -------------------------------------
+
+        paginated = paginate_results(
+            ranked,
+            limit,
+            offset
+        )
+
+        # -------------------------------------
+        # Remove internal score
+        # -------------------------------------
+
+        cleaned = []
+
+        for car in paginated["items"]:
+
+            if "_score" in car:
+                car.pop("_score")
+
+            cleaned.append(car)
+
+        # -------------------------------------
+        # Success Response
+        # -------------------------------------
+
+        return jsonify({
+
+            "success": True,
+
+            "message": f"{paginated['total']} cars found.",
+
+            "recommendations": cleaned,
+
+            "total": paginated["total"],
+
+            "offset": offset,
+
+            "limit": limit,
+
+            "has_more": paginated["has_more"]
+
+        })
+
+    except Exception as e:
+
+        return jsonify({
+            "success": False,
+            "message": str(e)
+        }), 500
+
+# =========================================================
+# TOP BRANDS API
+# =========================================================
+
+@app.route("/brands")
+def brands():
+
+    unique_brands = sorted(
+        list(
+            set(
+                car["brand"]
+                for car in cars
+                if car["brand"]
+            )
+        )
+    )
+
+    return jsonify({
+        "brands": unique_brands
+    })
+
+# =========================================================
+# TOP FUEL TYPES API
+# =========================================================
+
+@app.route("/fuel-types")
+def fuel_types():
+
+    unique_fuels = sorted(
+        list(
+            set(
+                car["fuel"]
+                for car in cars
+                if car["fuel"]
+            )
+        )
+    )
+
+    return jsonify({
+        "fuel_types": unique_fuels
+    })
+
+# =========================================================
+# CAR DETAILS API
+# =========================================================
+
+@app.route("/car/<car_name>")
+def car_details(car_name):
+
+    car_name = normalize_text(car_name)
+
+    for car in cars:
+
+        if car["name"] == car_name:
+
+            return jsonify({
+                "success": True,
+                "car": car
+            })
+
+    return jsonify({
+        "success": False,
+        "message": "Car not found."
+    }), 404
+
+# =========================================================
+# ERROR HANDLERS
+# =========================================================
+
+@app.errorhandler(404)
+def not_found(error):
+
+    return jsonify({
+        "success": False,
+        "message": "Route not found."
+    }), 404
+
+
+@app.errorhandler(500)
+def internal_error(error):
+
+    return jsonify({
+        "success": False,
+        "message": "Internal server error."
+    }), 500
+
+# =========================================================
+# START SERVER
+# =========================================================
+
+if __name__ == "__main__":
+
+    port = int(os.environ.get("PORT", 10000))
+
+    print(f"Running Smart Drive AI on port {port}")
+
+    app.run(
+        host="0.0.0.0",
+        port=port
+    )
