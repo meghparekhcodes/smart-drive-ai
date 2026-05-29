@@ -12,7 +12,7 @@ Built with Python and Flask, the platform provides fast and intelligent recommen
 
 ## 🚀 Live Demo
 
-🔗 **Live Website:** https://smart-drive-ai.onrender.com
+🔗 **Try YourSelf:** https://smart-drive-ai.onrender.com
 
 ---
 
