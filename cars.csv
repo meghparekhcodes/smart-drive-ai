@@ -1,265 +1,87 @@
-# app.py (updated)
-from flask import Flask, request, jsonify, render_template
-from flask_cors import CORS
-import csv
-import re
-from math import fabs
-
-app = Flask(__name__)
-CORS(app)
-
-
-def _parse_float_safe(val):
-    """
-    Try to parse numeric value from strings like "1,234,567" or "1234567.00".
-    Returns float or None.
-    """
-    if val is None:
-        return None
-    s = str(val).strip()
-    if s == "":
-        return None
-    # Remove any non-digit/non-dot characters (commas, currency symbols, spaces)
-    cleaned = re.sub(r"[^\d.]", "", s)
-    try:
-        return float(cleaned)
-    except ValueError:
-        return None
-
-
-# --- Load Car Data from CSV File ---
-def load_cars_from_csv(filename="cars.csv"):
-    """
-    Loads CSV into a list of dicts.
-    Normalizes name/brand/fuel (strip + lower).
-    Converts price fields to numeric and stores as 'price_in_inr' (float or None).
-    """
-    cars = []
-    try:
-        with open(filename, newline="", encoding="utf-8") as csvfile:
-            reader = csv.DictReader(csvfile)
-            for row in reader:
-                # Normalize text fields (so filters match reliably)
-                for text_col in ("name", "brand", "fuel"):
-                    if text_col in row:
-                        row[text_col] = (row[text_col] or "").strip().lower()
-                    else:
-                        row[text_col] = ""
-
-                # Normalize price: prefer 'price_in_inr', fall back to 'price'
-                price_in_inr = None
-                if "price_in_inr" in row and (row["price_in_inr"] or "").strip() != "":
-                    price_in_inr = _parse_float_safe(row["price_in_inr"])
-                elif "price" in row and (row["price"] or "").strip() != "":
-                    price_in_inr = _parse_float_safe(row["price"])
-
-                # store numeric price
-                row["price_in_inr"] = price_in_inr
-
-                # Optionally remove original 'price' if present
-                if "price" in row:
-                    row.pop("price", None)
-
-                cars.append(row)
-    except FileNotFoundError:
-        print(f"Error: {filename} not found. Make sure it exists!")
-    return cars
-
-
-# Load data from CSV at start (cache in memory)
-cars = load_cars_from_csv()
-
-
-# --- Scoring and sorting utility ---
-def score_and_sort_results(results, budget=None, brand_pref=None, fuel_pref=None):
-    """
-    Score each car in results and return a sorted list.
-    If budget is provided, we prefer cars that are closer to budget (higher price <= budget).
-    We compute a simple score:
-      base_score = -abs(price - budget)  (smaller distance -> higher score)
-    and small boosts for brand/fuel matches.
-    If no budget is provided, we sort by price ascending.
-    """
-    scored = []
-    for car in results:
-        price = car.get("price_in_inr")
-        # default score
-        score = 0.0
-        if budget is not None and price is not None:
-            # smaller absolute difference -> higher score
-            # use negative abs to allow descending sort later
-            score = -fabs(price - budget)
-            # prefer cars that are <= budget (slight bonus)
-            if price <= budget:
-                score += 1.0
-        else:
-            # fallback: prefer lower prices (simple)
-            score = -price if price is not None else float("-inf")
-
-        # brand boost (optional)
-        if brand_pref and (car.get("brand") or "") == brand_pref.lower():
-            score += 2.0
-        # fuel boost (optional)
-        if fuel_pref and (car.get("fuel") or "") == fuel_pref.lower():
-            score += 1.0
-
-        # attach numeric score for debugging/inspection
-        car["_score"] = score
-        scored.append(car)
-
-    # sort by score descending so highest score comes first
-    scored.sort(key=lambda r: r.get("_score", float("-inf")), reverse=True)
-    return scored
-
-
-# --- Filter cars based on user input ---
-def filter_cars(budget, brand, fuel):
-    """
-    Return cars that satisfy the given filters.
-    - budget: numeric or None (we interpret as max price)
-    - brand: substring match (case-insensitive)
-    - fuel: exact match (normalized)
-    """
-    results = []
-    for car in cars:
-        price = car.get("price_in_inr")
-        # If price is missing or not numeric, skip that row (you can change policy)
-        if price is None:
-            continue
-
-        if budget is not None:
-            # price must be <= budget
-            try:
-                if float(price) > float(budget):
-                    continue
-            except (ValueError, TypeError):
-                continue
-
-        # brand filter: allow substring matching (so "tata" matches "tata motors")
-        if brand:
-            if brand.lower() not in (car.get("brand") or "").lower():
-                continue
-
-        # fuel filter: exact normalized match
-        if fuel:
-            if fuel.lower() != (car.get("fuel") or "").lower():
-                continue
-
-        # Row passes all filters
-        results.append(car.copy())  # copy to avoid side-effects when scoring
-    return results
-
-
-def paginate_list(items, limit=3, offset=0):
-    """
-    Return a slice and metadata: items_slice, total_count, has_more
-    limit/offset are sanitized and converted to ints.
-    """
-    total = len(items)
-    # sanitize offset/limit
-    try:
-        offset = int(offset)
-        if offset < 0:
-            offset = 0
-    except (ValueError, TypeError):
-        offset = 0
-    try:
-        # If limit is None or empty, default to total (return all)
-        if limit in (None, "", []):
-            limit = total if total > 0 else 3
-        limit = int(limit)
-        if limit <= 0:
-            limit = 3
-    except (ValueError, TypeError):
-        limit = 3
-
-    slice_items = items[offset: offset + limit]
-    has_more = (offset + limit) < total
-    return slice_items, total, has_more
-
-
-# Home Route (serves your HTML page)
-@app.route('/')
-def home():
-    return render_template('index.html')
-
-
-# Recommendation API with pagination support
-@app.route('/recommend', methods=['POST', 'GET'])
-def recommend():
-    # Accept JSON body (POST) or query params (GET)
-    if request.method == 'POST':
-        data = request.get_json() or {}
-        budget_raw = data.get('budget', None)
-        brand = (data.get('brand') or '').strip()
-        fuel = (data.get('fuel') or '').strip()
-        # optional pagination params
-        limit = data.get('limit', None)
-        offset = data.get('offset', 0)
-    else:
-        # GET (fallback) - read from query string
-        budget_raw = request.args.get('budget', None)
-        brand = (request.args.get('brand') or '').strip()
-        fuel = (request.args.get('fuel') or '').strip()
-        limit = request.args.get('limit', None)
-        offset = request.args.get('offset', 0)
-
-    # parse budget safely (allow strings like "1,500,000")
-    try:
-        budget = _parse_float_safe(budget_raw) if budget_raw not in (None, "", []) else None
-    except Exception:
-        return jsonify({"message": "Invalid budget format."}), 400
-
-    # Reject negative budgets
-    if budget is not None and budget < 0:
-        return jsonify({"message": "Budget must be a positive number."}), 400
-
-    # Prevent returning entire dataset when no filters provided
-    if budget is None and not brand and not fuel:
-        return jsonify(
-            {
-                "recommendations": [],
-                "total": 0,
-                "has_more": False,
-                "message": "Please provide a budget or at least one filter (brand or fuel) before requesting recommendations."
-            }
-        ), 400
-
-    # Filter candidates first
-    all_matches = filter_cars(budget, brand, fuel)
-
-    if not all_matches:
-        return jsonify({"recommendations": [], "total": 0, "has_more": False, "message": "No cars found matching your preferences."})
-
-    # Score and sort matches (prefer cars closer to budget)
-    ranked = score_and_sort_results(all_matches, budget, brand_pref=brand, fuel_pref=fuel)
-
-    # apply pagination
-    slice_items, total, has_more = paginate_list(ranked, limit=limit, offset=offset)
-
-    # Remove internal _score before returning (but keep if you want to debug)
-    for c in slice_items:
-        if "_score" in c:
-            c.pop("_score", None)
-
-    # Normalize numeric metadata
-    try:
-        offset_int = int(offset)
-    except (ValueError, TypeError):
-        offset_int = 0
-    try:
-        limit_int = int(limit) if limit not in (None, "", []) else len(slice_items)
-    except (ValueError, TypeError):
-        limit_int = len(slice_items)
-
-    return jsonify({
-        "recommendations": slice_items,
-        "total": total,
-        "has_more": has_more,
-        "offset": offset_int,
-        "limit": limit_int
-    })
-
-
-if __name__ == '__main__':
-    app.run(debug=True)
+name,brand,fuel,price_in_inr
+chevrolet camaro,chevrolet,hybrid,5000000
+audi a6,audi,hybrid,6374000
+mercedes s-class,mercedes,electric,17800000
+hyundai i20,hyundai,electric,687000
+toyota innova,toyota,electric,1900000
+volkswagen taigun,volkswagen,diesel,1050000
+tata nexon,tata,petrol,732000
+audi q3,audi,hybrid,4307000
+tata harrier,tata,petrol,1499000
+hyundai tucson,hyundai,diesel,2700000
+audi q7,audi,electric,8614000
+mahindra xuv700,mahindra,petrol,1366000
+audi a3,audi,hybrid,3400000
+jeep wrangler,jeep,petrol,6000000
+kia seltos,kia,hybrid,1079000
+jeep compass,jeep,electric,1999000
+tata safari,tata,electric,1549000
+tesla model 3,tesla,hybrid,7000000
+bmw x5,bmw,hybrid,9300000
+toyota corolla,toyota,hybrid,1800000
+toyota camry,toyota,electric,5237300
+tesla model x,tesla,diesel,7753113
+bmw x3,bmw,diesel,7732861
+honda city,honda,diesel,6606302
+toyota yaris,toyota,petrol,836474
+mg hector,mg,diesel,3156573
+mercedes glc,mercedes,diesel,3320664
+kia sonet,kia,diesel,1721254
+mercedes e-class,mercedes,diesel,5818798
+mahindra scorpio,mahindra,electric,3048671
+nissan gtr,nissan,petrol,1511264
+honda jazz,honda,petrol,4856911
+volkswagen polo,volkswagen,diesel,3659055
+honda accord,honda,diesel,7414971
+tesla model s,tesla,electric,4321561
+bmw 3 series,bmw,diesel,3573482
+mahindra bolero,mahindra,diesel,8173840
+chevrolet cruze,chevrolet,hybrid,3783140
+toyota fortuner,toyota,electric,4917335
+chevrolet trailblazer,chevrolet,electric,4233166
+mercedes c-class,mercedes,petrol,7003706
+mg zs ev,mg,hybrid,7682065
+audi a4,audi,hybrid,7595745
+chevrolet spark,chevrolet,electric,6478067
+tesla model y,tesla,electric,7687460
+kia ev6,kia,electric,1993826
+jeep meridian,jeep,electric,3710930
+hyundai verna,hyundai,diesel,4245616
+volkswagen vento,volkswagen,diesel,6431338
+volkswagen tiguan,volkswagen,petrol,3794594
+bmw 5 series,bmw,diesel,1844509
+kia carnival,kia,diesel,1995735
+nissan micra,nissan,diesel,5176129
+mercedes a-class,mercedes,petrol,7334627
+hyundai creta,hyundai,petrol,1279279
+honda civic,honda,electric,4551471
+bmw 7 series,bmw,electric,6317462
+nissan kicks,nissan,diesel,6896470
+honda cr-v,honda,petrol,2524196
+nissan sunny,nissan,hybrid,5702349
+suzuki swift,suzuki,petrol,680000
+suzuki baleno,suzuki,petrol,820000
+suzuki dzire,suzuki,petrol,900000
+suzuki wagon r,suzuki,petrol,620000
+suzuki alto k10,suzuki,petrol,540000
+suzuki celerio,suzuki,petrol,590000
+hyundai grand i10 nios,hyundai,petrol,760000
+hyundai exter,hyundai,petrol,830000
+hyundai venue,hyundai,petrol,990000
+tata punch,tata,petrol,750000
+tata tiago,tata,petrol,620000
+tata tigor,tata,petrol,760000
+tata altroz,tata,petrol,880000
+renault kwid,renault,petrol,590000
+renault kiger,renault,petrol,900000
+nissan magnite,nissan,petrol,980000
+toyota glanza,toyota,petrol,890000
+honda amaze,honda,petrol,990000
+skoda slavia,skoda,petrol,1150000
+skoda kushaq,skoda,petrol,1150000
+skoda superb,skoda,petrol,3400000
+skoda octavia,skoda,petrol,2800000
+skoda kodiaq,skoda,petrol,4000000
+skoda rapid,skoda,petrol,950000
+skoda laura,skoda,petrol,1600000
+volkswagen virtus,volkswagen,petrol,1116000
